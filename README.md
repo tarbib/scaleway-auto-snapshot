@@ -1,7 +1,8 @@
 # Automatic snapshot tool for Scaleway
 
-Serverless Job on Scaleway: snapshot of an Instance volume (l_ssd or b_ssd), export to QCOW2 to an
-Object Storage bucket, snapshot deletion, then retention of the N most recent exports.
+Serverless Job on Scaleway: snapshot of an Instance volume (b_ssd; l_ssd support depends on
+Scaleway's current API, see note below), export to QCOW2 to an Object Storage bucket, snapshot
+deletion, then retention of the N most recent exports.
 
 Image: `ghcr.io/tarbib/scaleway-auto-snapshot:latest`
 
@@ -58,6 +59,9 @@ scw instance snapshot create name=restore volume-type=l_ssd \
 
 ## Notes
 
+- l_ssd (Local Storage) snapshots via the Instance API may no longer be supported by Scaleway.
+  If snapshot creation fails, migrate the volume to Block Storage (SBS) first — see
+  https://www.scaleway.com/en/docs/instances/how-to/migrate-local-storage-to-sbs/
 - Each export is a **full** copy, not a delta: bucket cost grows with retention.
   A lifecycle rule (Glacier transition) complements this well.
 - The bucket must be in the same region as the volume's zone.

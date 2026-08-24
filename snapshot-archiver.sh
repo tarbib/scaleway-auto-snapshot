@@ -17,6 +17,14 @@ EXPORT_TIMEOUT="${EXPORT_TIMEOUT:-7200}"
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR $*" >&2; exit 1; }
 
+case "$RETENTION" in
+  ''|*[!0-9]*) die "RETENTION must be a positive integer (got '$RETENTION')" ;;
+esac
+[ "$RETENTION" -ge 1 ] || die "RETENTION must be >= 1 (0 would delete every export on each run, including the one just created)"
+case "$EXPORT_TIMEOUT" in
+  ''|*[!0-9]*) die "EXPORT_TIMEOUT must be a positive integer number of seconds (got '$EXPORT_TIMEOUT')" ;;
+esac
+
 # rclone: "scw" remote defined solely via environment variables
 export RCLONE_CONFIG="/tmp/rclone.conf"; : > "$RCLONE_CONFIG"
 export RCLONE_CONFIG_SCW_TYPE="s3"
@@ -26,12 +34,13 @@ export RCLONE_CONFIG_SCW_SECRET_ACCESS_KEY="$SCW_SECRET_KEY"
 export RCLONE_CONFIG_SCW_REGION="$REGION"
 export RCLONE_CONFIG_SCW_ENDPOINT="${S3_ENDPOINT:-https://s3.$REGION.scw.cloud}"
 
+# Single lookup: gives both the owning server's name (for LABEL) and the volume type.
+VOLUME_INFO="$(scw instance volume get "$VOLUME_ID" zone="$ZONE" -o json 2>/dev/null)" || VOLUME_INFO=""
+
 # Folder = name of the instance the volume is attached to, otherwise its UUID
 LABEL="${LABEL:-}"
 if [ -z "$LABEL" ]; then
-  LABEL="$(scw instance server list zone="$ZONE" -o json 2>/dev/null \
-    | jq -r --arg v "$VOLUME_ID" '.[] | select([.volumes[]?.id] | index($v)) | .name' \
-    | head -n1)" || true
+  LABEL="$(echo "$VOLUME_INFO" | jq -r '.volume.server.name // empty' 2>/dev/null)" || LABEL=""
 fi
 [ -n "$LABEL" ] || LABEL="$VOLUME_ID"
 LABEL="$(echo "$LABEL" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._-' '-' | sed 's/-*$//')"
@@ -42,8 +51,7 @@ KEY="$DIR/$NAME.qcow2"
 
 log "volume=$VOLUME_ID zone=$ZONE -> s3://$BUCKET/$KEY (retention=$RETENTION)"
 
-VOLUME_TYPE="$(scw instance volume get "$VOLUME_ID" zone="$ZONE" -o json 2>/dev/null \
-  | jq -r '.volume.volume_type // empty')" || true
+VOLUME_TYPE="$(echo "$VOLUME_INFO" | jq -r '.volume.volume_type // empty' 2>/dev/null)" || VOLUME_TYPE=""
 if [ "$VOLUME_TYPE" = "l_ssd" ]; then
   log "INFO: Local Storage volume (l_ssd). Export to Object Storage is supported for this type, but if the snapshot goes to 'error'/'invalid_data' during export, check: bucket SSE-KMS encryption (not supported), snapshot size (must be between 1 GB and 1 TB), and IAM permissions on the bucket."
 fi
@@ -65,6 +73,7 @@ status() {
     echo "unknown"
     return 0
   }
+  STATUS_RAW="$raw"
   st="$(echo "$raw" | jq -r '.snapshot.state // .state' 2>&1)" || {
     log "warning: non-JSON response from scw (retrying): $(echo "$raw" | tr '\n' ' ')"
     echo "unknown"
@@ -77,13 +86,19 @@ status() {
 # visible in the bucket: multipart upload only publishes it at the end.
 wait_stable() {
   end=$(( $(date +%s) + $3 ))
+  fail_count=0
   while :; do
     st="$(status "$1")"
+    if [ "$st" = "unknown" ]; then
+      fail_count=$((fail_count + 1))
+      [ "$fail_count" -lt 5 ] || die "unable to query snapshot $1 status after $fail_count consecutive attempts"
+    else
+      fail_count=0
+    fi
     case "$st" in
       error|invalid_data)
-        raw="$(scw instance snapshot get "$1" zone="$ZONE" -o json 2>&1)"
-        detail="$(echo "$raw" | jq -c . 2>/dev/null)"
-        [ -n "$detail" ] || detail="$(echo "$raw" | tr '\n' ' ')"
+        detail="$(echo "$STATUS_RAW" | jq -c . 2>/dev/null)"
+        [ -n "$detail" ] || detail="$(echo "$STATUS_RAW" | tr '\n' ' ')"
         log "error detail: $detail"
         die "snapshot $1 is '$st'"
         ;;
@@ -92,25 +107,30 @@ wait_stable() {
       if [ -z "$2" ]; then
         return 0
       fi
-      if rclone lsf "scw:$BUCKET/$2" 2>/dev/null | grep -q .; then
-        return 0
-      fi
+      lsf_out="$(rclone lsf "scw:$BUCKET/$2" 2>&1)" || die "bucket visibility check failed: $(echo "$lsf_out" | tr '\n' ' ')"
+      [ -z "$lsf_out" ] || return 0
     fi
     [ "$(date +%s)" -lt "$end" ] || die "timeout after ${3}s (status=$st)"
     sleep 15
   done
 }
 
-SNAP="$(scw instance snapshot create volume-id="$VOLUME_ID" name="$NAME" zone="$ZONE" -o json \
-        | jq -r '.snapshot.id // .id')"
-if [ -z "$SNAP" ] || [ "$SNAP" = "null" ]; then
-  SNAP=""
+die_snapshot_create_failed() {
   die "unable to create the snapshot.
   Likely cause: snapshots of Local Storage volumes (l_ssd) via the Instance API
   are no longer supported by Scaleway. The volume must be migrated to Block Storage
   (SBS), then 'scw instance snapshot' replaced with 'scw block snapshot' and
   '.snapshot.state' with '.status' in this script.
   https://www.scaleway.com/en/docs/instances/how-to/migrate-local-storage-to-sbs/"
+}
+
+if ! CREATE_OUT="$(scw instance snapshot create volume-id="$VOLUME_ID" name="$NAME" zone="$ZONE" -o json)"; then
+  die_snapshot_create_failed
+fi
+SNAP="$(echo "$CREATE_OUT" | jq -r '.snapshot.id // .id' 2>/dev/null)" || SNAP=""
+if [ -z "$SNAP" ] || [ "$SNAP" = "null" ]; then
+  SNAP=""
+  die_snapshot_create_failed
 fi
 log "snapshot $SNAP created"
 
@@ -129,14 +149,22 @@ scw instance snapshot delete "$SNAP" zone="$ZONE" >/dev/null
 log "snapshot deleted"
 SNAP=""
 
-rclone lsjson "scw:$BUCKET/$DIR" \
-  | jq -r --argjson n "$RETENTION" \
-      '[ .[] | select(.IsDir == false) | select(.Name | endswith(".qcow2")) ]
-       | sort_by(.ModTime) | reverse | .[$n:] | .[] | .Path' \
-  | while IFS= read -r obj; do
-      [ -n "$obj" ] || continue
-      log "retention: deleting $DIR/$obj"
-      rclone deletefile "scw:$BUCKET/$DIR/$obj"
-    done
+# Written to files (not piped) so a failure at any stage reaches die() instead
+# of being swallowed by the exit status of the final pipeline stage.
+RETENTION_LIST="/tmp/retention.json"
+RETENTION_STALE="/tmp/retention-stale.txt"
+
+rclone lsjson "scw:$BUCKET/$DIR" > "$RETENTION_LIST" || die "retention: 'rclone lsjson' failed"
+jq -r --argjson n "$RETENTION" \
+  '[ .[] | select(.IsDir == false) | select(.Name | endswith(".qcow2")) ]
+   | sort_by(.ModTime) | reverse | .[$n:] | .[] | .Path' \
+  "$RETENTION_LIST" > "$RETENTION_STALE" || die "retention: failed to compute stale objects"
+
+while IFS= read -r obj; do
+  [ -n "$obj" ] || continue
+  log "retention: deleting $DIR/$obj"
+  rclone deletefile "scw:$BUCKET/$DIR/$obj" || die "retention: failed to delete $DIR/$obj"
+done < "$RETENTION_STALE"
+rm -f "$RETENTION_LIST" "$RETENTION_STALE"
 
 log "done"
