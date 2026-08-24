@@ -1,12 +1,12 @@
 #!/bin/sh
-# Snapshot d'un volume Instance -> export QCOW2 vers un bucket
-# -> suppression du snapshot -> retention des N derniers exports.
+# Snapshot an Instance volume -> export QCOW2 to a bucket
+# -> delete the snapshot -> retain the N most recent exports.
 set -eu
 
-: "${SCW_ACCESS_KEY:?requis}"
-: "${SCW_SECRET_KEY:?requis}"
-: "${VOLUME_ID:?requis}"
-: "${BUCKET:?requis}"
+: "${SCW_ACCESS_KEY:?required}"
+: "${SCW_SECRET_KEY:?required}"
+: "${VOLUME_ID:?required}"
+: "${BUCKET:?required}"
 
 ZONE="${ZONE:-${SCW_DEFAULT_ZONE:-fr-par-1}}"
 REGION="${REGION:-$(echo "$ZONE" | sed 's/-[0-9]*$//')}"
@@ -15,9 +15,9 @@ PREFIX="${PREFIX:-snapshots}"
 EXPORT_TIMEOUT="${EXPORT_TIMEOUT:-7200}"
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-die() { log "ERREUR $*" >&2; exit 1; }
+die() { log "ERROR $*" >&2; exit 1; }
 
-# rclone : remote "scw" defini uniquement par variables d'environnement
+# rclone: "scw" remote defined solely via environment variables
 export RCLONE_CONFIG="/tmp/rclone.conf"; : > "$RCLONE_CONFIG"
 export RCLONE_CONFIG_SCW_TYPE="s3"
 export RCLONE_CONFIG_SCW_PROVIDER="Scaleway"
@@ -26,7 +26,7 @@ export RCLONE_CONFIG_SCW_SECRET_ACCESS_KEY="$SCW_SECRET_KEY"
 export RCLONE_CONFIG_SCW_REGION="$REGION"
 export RCLONE_CONFIG_SCW_ENDPOINT="${S3_ENDPOINT:-https://s3.$REGION.scw.cloud}"
 
-# Dossier = nom de l'instance a laquelle le volume est attache, sinon son UUID
+# Folder = name of the instance the volume is attached to, otherwise its UUID
 LABEL="${LABEL:-}"
 if [ -z "$LABEL" ]; then
   LABEL="$(scw instance server list zone="$ZONE" -o json 2>/dev/null \
@@ -45,15 +45,15 @@ log "volume=$VOLUME_ID zone=$ZONE -> s3://$BUCKET/$KEY (retention=$RETENTION)"
 VOLUME_TYPE="$(scw instance volume get "$VOLUME_ID" zone="$ZONE" -o json 2>/dev/null \
   | jq -r '.volume.volume_type // empty')" || true
 if [ "$VOLUME_TYPE" = "l_ssd" ]; then
-  log "INFO : volume en Local Storage (l_ssd). L'export vers Object Storage est supporte pour ce type, mais si le snapshot passe en 'error'/'invalid_data' pendant l'export, verifier : chiffrement SSE-KMS du bucket (non supporte), taille du snapshot (doit etre entre 1 Go et 1 To), et les permissions IAM sur le bucket."
+  log "INFO: Local Storage volume (l_ssd). Export to Object Storage is supported for this type, but if the snapshot goes to 'error'/'invalid_data' during export, check: bucket SSE-KMS encryption (not supported), snapshot size (must be between 1 GB and 1 TB), and IAM permissions on the bucket."
 fi
 
-# Si le script s'arrete (erreur, timeout) avant la suppression normale du
-# snapshot, on evite de le laisser orphelin (il continue sinon a etre facture).
+# If the script stops (error, timeout) before the snapshot is deleted normally,
+# avoid leaving it orphaned (otherwise it keeps being billed).
 SNAP=""
 cleanup() {
   if [ -n "$SNAP" ]; then
-    log "nettoyage : suppression du snapshot $SNAP suite a une erreur"
+    log "cleanup: deleting snapshot $SNAP following an error"
     scw instance snapshot delete "$SNAP" zone="$ZONE" >/dev/null 2>&1 || true
   fi
 }
@@ -61,20 +61,20 @@ trap cleanup EXIT
 
 status() {
   raw="$(scw instance snapshot get "$1" zone="$ZONE" -o json 2>&1)" || {
-    log "avertissement : echec de 'scw instance snapshot get' (retente) : $(echo "$raw" | tr '\n' ' ')"
+    log "warning: 'scw instance snapshot get' failed (retrying): $(echo "$raw" | tr '\n' ' ')"
     echo "unknown"
     return 0
   }
   st="$(echo "$raw" | jq -r '.snapshot.state // .state' 2>&1)" || {
-    log "avertissement : reponse non-JSON de scw (retente) : $(echo "$raw" | tr '\n' ' ')"
+    log "warning: non-JSON response from scw (retrying): $(echo "$raw" | tr '\n' ' ')"
     echo "unknown"
     return 0
   }
   echo "$st"
 }
 
-# Attend un statut stable. Si $2 est renseigne, attend aussi que l'objet soit
-# visible dans le bucket : l'upload multipart ne le publie qu'a la fin.
+# Wait for a stable status. If $2 is set, also wait for the object to be
+# visible in the bucket: multipart upload only publishes it at the end.
 wait_stable() {
   end=$(( $(date +%s) + $3 ))
   while :; do
@@ -84,8 +84,8 @@ wait_stable() {
         raw="$(scw instance snapshot get "$1" zone="$ZONE" -o json 2>&1)"
         detail="$(echo "$raw" | jq -c . 2>/dev/null)"
         [ -n "$detail" ] || detail="$(echo "$raw" | tr '\n' ' ')"
-        log "detail de l'erreur : $detail"
-        die "snapshot $1 en '$st'"
+        log "error detail: $detail"
+        die "snapshot $1 is '$st'"
         ;;
     esac
     if [ "$st" = "available" ]; then
@@ -96,7 +96,7 @@ wait_stable() {
         return 0
       fi
     fi
-    [ "$(date +%s)" -lt "$end" ] || die "timeout apres $3s (statut=$st)"
+    [ "$(date +%s)" -lt "$end" ] || die "timeout after ${3}s (status=$st)"
     sleep 15
   done
 }
@@ -105,28 +105,28 @@ SNAP="$(scw instance snapshot create volume-id="$VOLUME_ID" name="$NAME" zone="$
         | jq -r '.snapshot.id // .id')"
 if [ -z "$SNAP" ] || [ "$SNAP" = "null" ]; then
   SNAP=""
-  die "creation du snapshot impossible.
-  Cause probable : les snapshots de volumes Local Storage (l_ssd) via l'API Instance
-  ne sont plus supportes par Scaleway. Il faut migrer le volume vers Block Storage
-  (SBS), puis remplacer 'scw instance snapshot' par 'scw block snapshot' et
-  '.snapshot.state' par '.status' dans ce script.
+  die "unable to create the snapshot.
+  Likely cause: snapshots of Local Storage volumes (l_ssd) via the Instance API
+  are no longer supported by Scaleway. The volume must be migrated to Block Storage
+  (SBS), then 'scw instance snapshot' replaced with 'scw block snapshot' and
+  '.snapshot.state' with '.status' in this script.
   https://www.scaleway.com/en/docs/instances/how-to/migrate-local-storage-to-sbs/"
 fi
-log "snapshot $SNAP cree"
+log "snapshot $SNAP created"
 
 wait_stable "$SNAP" "" 1800
 EXPORT_OUT="$(scw instance snapshot export \
   snapshot-id="$SNAP" bucket="$BUCKET" key="$KEY" zone="$ZONE" 2>&1)" || {
-  log "detail de l'erreur (export) : $(echo "$EXPORT_OUT" | tr '\n' ' ')"
-  die "echec de l'appel export"
+  log "error detail (export): $(echo "$EXPORT_OUT" | tr '\n' ' ')"
+  die "export call failed"
 }
-log "export en cours..."
+log "export in progress..."
 
 wait_stable "$SNAP" "$KEY" "$EXPORT_TIMEOUT"
-log "export termine"
+log "export complete"
 
 scw instance snapshot delete "$SNAP" zone="$ZONE" >/dev/null
-log "snapshot supprime"
+log "snapshot deleted"
 SNAP=""
 
 rclone lsjson "scw:$BUCKET/$DIR" \
@@ -135,8 +135,8 @@ rclone lsjson "scw:$BUCKET/$DIR" \
        | sort_by(.ModTime) | reverse | .[$n:] | .[] | .Path' \
   | while IFS= read -r obj; do
       [ -n "$obj" ] || continue
-      log "retention : suppression de $DIR/$obj"
+      log "retention: deleting $DIR/$obj"
       rclone deletefile "scw:$BUCKET/$DIR/$obj"
     done
 
-log "termine"
+log "done"

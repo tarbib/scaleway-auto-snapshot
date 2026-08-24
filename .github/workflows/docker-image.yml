@@ -17,18 +17,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Convertir le nom du repo en minuscules
+      - name: Convert repo name to lowercase
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
-      - name: Connexion au GitHub Container Registry
+      - name: Log in to GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Build de l'image
+      - name: Build image
         run: |
           docker build . --file Dockerfile \
             --tag $IMAGE:latest \
             --tag $IMAGE:${{ github.sha }}
 
-      - name: Push (hors pull request)
+      - name: Push (outside pull request)
         if: github.event_name != 'pull_request'
         run: docker push --all-tags $IMAGE

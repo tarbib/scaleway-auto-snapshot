@@ -1,33 +1,33 @@
 # Automatic snapshot tool for Scaleway
 
-Serverless Job Scaleway : snapshot d'un volume d'Instance (l_ssd ou b_ssd), export en QCOW2 vers un
-bucket Object Storage, suppression du snapshot, puis rétention des N derniers exports.
+Serverless Job on Scaleway: snapshot of an Instance volume (l_ssd or b_ssd), export to QCOW2 to an
+Object Storage bucket, snapshot deletion, then retention of the N most recent exports.
 
-Image : `ghcr.io/tarbib/scaleway-auto-snapshot:latest`
+Image: `ghcr.io/tarbib/scaleway-auto-snapshot:latest`
 
-## Variables d'environnement
+## Environment variables
 
-| Variable | Défaut | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `SCW_ACCESS_KEY` | — | clé d'API IAM |
-| `SCW_SECRET_KEY` | — | clé secrète IAM |
-| `SCW_DEFAULT_PROJECT_ID` | — | projet cible |
-| `VOLUME_ID` | — | UUID du volume |
-| `BUCKET` | — | bucket de destination, **même région que le volume** |
-| `ZONE` | `fr-par-1` | zone du volume |
-| `RETENTION` | `3` | nombre d'exports `.qcow2` conservés dans le bucket |
-| `PREFIX` | `snapshots` | racine des clés : `<PREFIX>/<instance>/autosnap-<date>.qcow2` |
-| `LABEL` | nom de l'instance | force le nom du dossier |
-| `EXPORT_TIMEOUT` | `7200` | timeout de l'export, en secondes |
+| `SCW_ACCESS_KEY` | — | IAM API key |
+| `SCW_SECRET_KEY` | — | IAM secret key |
+| `SCW_DEFAULT_PROJECT_ID` | — | target project |
+| `VOLUME_ID` | — | volume UUID |
+| `BUCKET` | — | destination bucket, **same region as the volume** |
+| `ZONE` | `fr-par-1` | volume zone |
+| `RETENTION` | `3` | number of `.qcow2` exports kept in the bucket |
+| `PREFIX` | `snapshots` | key root: `<PREFIX>/<instance>/autosnap-<date>.qcow2` |
+| `LABEL` | instance name | forces the folder name |
+| `EXPORT_TIMEOUT` | `7200` | export timeout, in seconds |
 
-Le dossier porte le nom de l'instance à laquelle le volume est attaché ; si l'instance est
-renommée, un nouveau dossier apparaît et la rétention repart de zéro dans celui-ci.
+The folder is named after the instance the volume is attached to; if the instance is
+renamed, a new folder appears and retention starts over from zero in it.
 
-## Droits IAM du job
+## Job IAM permissions
 
-`InstancesFullAccess` + `ObjectStorageFullAccess`, sur le projet concerné.
+`InstancesFullAccess` + `ObjectStorageFullAccess`, on the relevant project.
 
-## Créer le job
+## Create the job
 
 ```sh
 scw jobs definition create \
@@ -42,14 +42,14 @@ scw jobs definition create \
   region=fr-par
 ```
 
-Les clés d'API se passent via Secret Manager plutôt qu'en variables d'environnement en clair.
+Pass API keys via Secret Manager rather than as plain-text environment variables.
 
-## Restaurer
+## Restore
 
-Depuis la console : Object Storage > le bucket > menu de l'objet > **Import as snapshot**,
-en choisissant le type Local Storage ou Block SSD. Puis créer une Instance à partir de ce snapshot.
+From the console: Object Storage > the bucket > object menu > **Import as snapshot**,
+choosing Local Storage or Block SSD type. Then create an Instance from that snapshot.
 
-En CLI :
+Via CLI:
 
 ```sh
 scw instance snapshot create name=restore volume-type=l_ssd \
@@ -58,7 +58,7 @@ scw instance snapshot create name=restore volume-type=l_ssd \
 
 ## Notes
 
-- Chaque export est une copie **complète**, pas un delta : le coût du bucket croît avec la rétention.
-  Une règle de cycle de vie (transition Glacier) la complète bien.
-- Le bucket doit être dans la même région que la zone du volume.
-- La réimportation exige une taille entre 1 Go et 1 To.
+- Each export is a **full** copy, not a delta: bucket cost grows with retention.
+  A lifecycle rule (Glacier transition) complements this well.
+- The bucket must be in the same region as the volume's zone.
+- Reimport requires a size between 1 GB and 1 TB.
