@@ -1,4 +1,4 @@
-# scw-snapshot-archiver
+# Automatic snapshot tool for Scaleway
 
 Serverless Job Scaleway : snapshot d'un volume d'Instance (l_ssd ou b_ssd), export en QCOW2 vers un
 bucket Object Storage, suppression du snapshot, puis rétention des N derniers exports.
