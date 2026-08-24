@@ -1,0 +1,34 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Convertir le nom du repo en minuscules
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
+      - name: Connexion au GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build de l'image
+        run: |
+          docker build . --file Dockerfile \
+            --tag $IMAGE:latest \
+            --tag $IMAGE:${{ github.sha }}
+
+      - name: Push (hors pull request)
+        if: github.event_name != 'pull_request'
+        run: docker push --all-tags $IMAGE
