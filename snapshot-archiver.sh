@@ -107,8 +107,12 @@ wait_stable() {
       if [ -z "$2" ]; then
         return 0
       fi
-      lsf_out="$(rclone lsf "scw:$BUCKET/$2" 2>&1)" || die "bucket visibility check failed: $(echo "$lsf_out" | tr '\n' ' ')"
-      [ -z "$lsf_out" ] || return 0
+      size_out="$(rclone lsf --format s "scw:$BUCKET/$2" 2>&1)" || die "bucket visibility check failed: $(echo "$size_out" | tr '\n' ' ')"
+      case "$size_out" in
+        *[!0-9]*|'') : ;;  # object not visible yet, keep waiting
+        0) log "warning: export object exists but is 0 bytes so far, waiting" ;;
+        *) EXPORT_SIZE="$size_out"; return 0 ;;
+      esac
     fi
     [ "$(date +%s)" -lt "$end" ] || die "timeout after ${3}s (status=$st)"
     sleep 15
@@ -143,7 +147,7 @@ EXPORT_OUT="$(scw instance snapshot export \
 log "export in progress..."
 
 wait_stable "$SNAP" "$KEY" "$EXPORT_TIMEOUT"
-log "export complete"
+log "export complete: s3://$BUCKET/$KEY (${EXPORT_SIZE:-unknown} bytes)"
 
 scw instance snapshot delete "$SNAP" zone="$ZONE" >/dev/null
 log "snapshot deleted"
