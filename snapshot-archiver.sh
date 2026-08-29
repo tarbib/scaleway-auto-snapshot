@@ -159,9 +159,14 @@ RETENTION_LIST="/tmp/retention.json"
 RETENTION_STALE="/tmp/retention-stale.txt"
 
 rclone lsjson "scw:$BUCKET/$DIR" > "$RETENTION_LIST" || die "retention: 'rclone lsjson' failed"
+# 0-byte (or smaller) exports are leftovers from a failed/interrupted run: they
+# don't count as a real backup, so they're excluded from the N kept and always
+# deleted, regardless of retention.
 jq -r --argjson n "$RETENTION" \
-  '[ .[] | select(.IsDir == false) | select(.Name | endswith(".qcow2")) ]
-   | sort_by(.ModTime) | reverse | .[$n:] | .[] | .Path' \
+  '[ .[] | select(.IsDir == false) | select(.Name | endswith(".qcow2")) ] as $all
+   | ($all | map(select(.Size > 0)) | sort_by(.ModTime) | reverse | .[$n:])
+     + ($all | map(select(.Size <= 0)))
+   | .[] | .Path' \
   "$RETENTION_LIST" > "$RETENTION_STALE" || die "retention: failed to compute stale objects"
 
 while IFS= read -r obj; do
